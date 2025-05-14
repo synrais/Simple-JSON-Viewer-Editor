@@ -5,6 +5,6 @@ Double click a field to edit its content, or use the Reorder Fields button to ch
 Do not forget to hit the Save JSON button! <br/>
 CTRL+C to copy anything highlighted to the clipboard. <br/>
 Columns can be A-Z sorted by clicking on them. <br/>
-Exe is drop and drag ready. <br/>
+You can drag and drop a JSON file onto the EXE to load it or browse to a location. <br/>
 
 ![screenshot](https://github.com/synrais/Simple-JSON-Viewer-Editor/blob/main/Screenshot.png)

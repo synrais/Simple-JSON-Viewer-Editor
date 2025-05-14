@@ -1,18 +1,22 @@
 import sys
+import json
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import tkinter.font as tkFont
-import json
-import pandas as pd
 
 class JSONCheckerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Inspector JSON")
-        # sensible starting size
+        # sensible default size
         self.root.geometry("1000x600")
-        self.df = None
-        self.orig_format = None   # 'dict' or 'list'
+        # data
+        self.records = []            # full list of record dicts
+        self.current_records = []    # filtered/subset for display
+        self.record_map = {}         # idx → record
+        self.columns = []            # current column order
+        self.orig_format = None      # 'dict' or 'list'
+        # UI
         self.setup_ui()
         self.center_window()
 
@@ -56,12 +60,10 @@ class JSONCheckerApp:
 
     def load_json(self):
         path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
-        if not path:
-            return
-        self._load_data_from_path(path)
+        if path:
+            self._load_data_from_path(path)
 
     def load_json_file(self, path):
-        """Load JSON directly from a given filepath (for drag-and-drop)."""
         self._load_data_from_path(path)
 
     def _load_data_from_path(self, path):
@@ -72,86 +74,113 @@ class JSONCheckerApp:
             messagebox.showerror("Error", f"Failed to load JSON: {e}")
             return
 
+        # remember original format
         self.orig_format = 'dict' if isinstance(data, dict) else 'list'
-        records = []
+
+        # flatten into list of dicts
+        recs = []
         if isinstance(data, dict):
             for k, v in data.items():
                 if isinstance(v, dict):
-                    rec = {'ID key': k}
-                    rec.update(v)
-                    records.append(rec)
+                    r = {'ID key': k}
+                    r.update(v)
+                    recs.append(r)
         else:
             for item in data:
                 if isinstance(item, dict):
                     if 'key' in item and 'ID key' not in item:
                         item['ID key'] = item.pop('key')
-                    records.append(item)
+                    recs.append(item)
 
-        self.df = pd.DataFrame(records)
+        # assign internal _idx and build record_map
+        self.records = []
+        self.record_map = {}
+        for idx, r in enumerate(recs):
+            r['_idx'] = idx
+            self.records.append(r)
+            self.record_map[idx] = r
+
+        # current_records initially full
+        self.current_records = list(self.records)
+
+        # determine columns in first-seen order
+        cols = []
+        for r in self.records:
+            for k in r.keys():
+                if k not in cols:
+                    cols.append(k)
+        # drop internal _idx
+        if '_idx' in cols:
+            cols.remove('_idx')
+        self.columns = cols
+
+        # rebuild buttons & table
         self.build_dynamic_buttons()
-        self.show_treeview(self.df)
+        self.show_treeview(self.current_records)
         self.center_window()
 
     def show_all(self):
-        if self.df is None:
+        if not self.records:
             messagebox.showerror("Error", "No data loaded.")
         else:
-            self.show_treeview(self.df)
+            self.current_records = list(self.records)
+            self.show_treeview(self.current_records)
             self.center_window()
 
     def build_dynamic_buttons(self):
         for w in self.dynamic_frame.winfo_children():
             w.destroy()
-        if self.df is None:
+        if not self.columns:
             return
-        cols = list(self.df.columns)
-        for title, func in [('Missing', self.show_missing),
-                            ('Unique',  self.show_unique),
-                            ('Filter',  self.filter_dialog)]:
+        for title, func in [
+            ('Missing', self.show_missing),
+            ('Unique',  self.show_unique),
+            ('Filter',  self.filter_dialog)
+        ]:
             fr = ttk.LabelFrame(self.dynamic_frame, text=title)
             fr.pack(side="left", padx=5, pady=5, fill="y")
-            for col in cols:
+            for col in self.columns:
                 ttk.Button(fr, text=col, command=lambda c=col, f=func: f(c))\
                     .pack(fill="x", padx=2, pady=2)
 
-    def show_treeview(self, df):
+    def show_treeview(self, records):
         self.tree.delete(*self.tree.get_children())
-        display = df.fillna("")  # blanks for missing
-        cols = list(display.columns)
-        self.tree["columns"] = cols
-
+        # prepare display records (missing → blank)
         style = ttk.Style()
         font = tkFont.nametofont(style.lookup("Treeview", "font") or "TkTextFont")
-
-        for col in cols:
+        # set columns
+        self.tree['columns'] = self.columns
+        # headings & zero-width
+        for col in self.columns:
             self.tree.heading(col, text=col,
-                command=lambda c=col: self.treeview_sort_column(c, False))
-            self.tree.column(col, anchor="w", stretch=False, width=0)
-
-        for idx, row in display.iterrows():
-            self.tree.insert('', 'end', iid=str(idx),
-                             values=[str(v) for v in row])
-
+                              command=lambda c=col: self.treeview_sort_column(c, False))
+            self.tree.column(col, anchor='w', stretch=False, width=0)
+        # insert rows
+        for r in records:
+            iid = str(r['_idx'])
+            vals = [str(r.get(col, '') or '') for col in self.columns]
+            self.tree.insert('', 'end', iid=iid, values=vals)
         self.tree.update_idletasks()
-
-        for col in cols:
+        # auto-size
+        for col in self.columns:
             max_w = font.measure(col)
-            for val in display[col]:
-                w = font.measure(str(val))
+            for r in records:
+                w = font.measure(str(r.get(col, '') or ''))
                 if w > max_w:
                     max_w = w
-            self.tree.column(col, width=max_w + 10, stretch=False)
-
-        self.count_var.set(f"Total: {len(display)}")
+            self.tree.column(col, width=max_w+10, stretch=False)
+        # update count
+        self.count_var.set(f"Total: {len(records)}")
 
     def treeview_sort_column(self, col, reverse):
-        data = [(self.tree.set(i, col), i) for i in self.tree.get_children('')]
+        children = self.tree.get_children('')
+        data = [(self.tree.set(i, col), i) for i in children]
         try:
-            data.sort(key=lambda x: float(x[0]) if x[0] else float("-inf"), reverse=reverse)
+            data.sort(key=lambda x: float(x[0]) if x[0] else float('-inf'), reverse=reverse)
         except:
             data.sort(key=lambda x: x[0], reverse=reverse)
-        for idx, (_, item) in enumerate(data):
-            self.tree.move(item, '', idx)
+        for idx, (_, iid) in enumerate(data):
+            self.tree.move(iid, '', idx)
         self.tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
 
     def copy_selection(self, event):
@@ -159,7 +188,7 @@ class JSONCheckerApp:
         if not sel:
             return
         rows = [self.tree.item(i, 'values') for i in sel]
-        text = "\n".join("\t".join(map(str, r)) for r in rows)
+        text = "\n".join("\t".join(r) for r in rows)
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
 
@@ -167,141 +196,124 @@ class JSONCheckerApp:
         region = self.tree.identify("region", event.x, event.y)
         if region != "cell":
             return
-        row_id = self.tree.identify_row(event.y)
-        col_id = self.tree.identify_column(event.x)
-        x, y, width, height = self.tree.bbox(row_id, col_id)
-        col_index = int(col_id.replace("#","")) - 1
-        col_name = self.tree["columns"][col_index]
-        old_val = self.tree.set(row_id, col_name)
-
+        row = self.tree.identify_row(event.y)
+        col = self.tree.identify_column(event.x)
+        x,y,wid,ht = self.tree.bbox(row, col)
+        ci = int(col.replace('#','')) - 1
+        col_name = self.columns[ci]
+        old = self.tree.set(row, col_name)
         entry = ttk.Entry(self.tree)
-        entry.place(x=x, y=y, width=width, height=height)
-        entry.insert(0, old_val)
+        entry.place(x=x, y=y, width=wid, height=ht)
+        entry.insert(0, old)
         entry.focus_set()
-
-        def save_edit(e):
-            new_val = entry.get()
-            self.tree.set(row_id, col_name, new_val)
-            try:
-                self.df.at[int(row_id), col_name] = new_val
-            except:
-                pass
+        def save(e):
+            nv = entry.get()
+            self.tree.set(row, col_name, nv)
+            idx = int(row)
+            rec = self.record_map.get(idx)
+            if rec is not None:
+                rec[col_name] = nv
             entry.destroy()
-
-        entry.bind("<Return>", save_edit)
-        entry.bind("<FocusOut>", save_edit)
+        entry.bind("<Return>", save)
+        entry.bind("<FocusOut>", save)
 
     def show_missing(self, field):
-        if self.df is not None:
-            mask = self.df[field].isna() | (self.df[field] == "")
-            self.show_treeview(self.df[mask])
-            self.center_window()
+        self.current_records = [
+            r for r in self.records
+            if (r.get(field,'') or '') == ''
+        ]
+        self.show_treeview(self.current_records)
+        self.center_window()
 
     def show_unique(self, field):
-        s = self.df[field].dropna()
-        items = []
-        for v in s:
-            if isinstance(v, (list, tuple, set)):
-                items.extend(v)
+        vals = []
+        for r in self.records:
+            v = r.get(field)
+            if v is None or v == '':
+                continue
+            if isinstance(v, (list,tuple,set)):
+                vals.extend(v)
             else:
-                items.append(v)
-        vals = sorted(set(items), key=lambda x: str(x))
-        messagebox.showinfo(f"Unique values for {field}", "\n".join(map(str, vals)))
+                vals.append(v)
+        uniques = sorted({str(x) for x in vals})
+        messagebox.showinfo(f"Unique values for {field}", "\n".join(uniques))
 
     def filter_dialog(self, field):
         pop = tk.Toplevel(self.root)
         pop.title(f"Filter {field}")
         ttk.Label(pop, text=f"Filter {field}:").pack(padx=10, pady=5)
-        ent = ttk.Entry(pop)
-        ent.pack(padx=10, pady=5)
-        ent.focus_set()
+        ent = ttk.Entry(pop); ent.pack(padx=10, pady=5); ent.focus_set()
         ttk.Button(pop, text="OK", command=lambda: go()).pack(pady=5)
-
         def go():
-            val = ent.get().strip()
+            val = ent.get().strip().lower()
             pop.destroy()
             if val:
-                sub = self.df[self.df[field].astype(str).str.contains(val, case=False, na=False)]
-                self.show_treeview(sub)
+                self.current_records = [
+                    r for r in self.records
+                    if val in str(r.get(field,'')).lower()
+                ]
+                self.show_treeview(self.current_records)
                 self.center_window()
-
-        pop.transient(self.root)
-        pop.grab_set()
-        pop.wait_window()
+        pop.transient(self.root); pop.grab_set(); pop.wait_window()
 
     def reorder_fields(self):
-        if self.df is None:
+        if not self.columns:
             messagebox.showerror("Error", "No data loaded.")
             return
-
-        cols = list(self.df.columns)
+        cols = list(self.columns)
         font = tkFont.nametofont("TkTextFont")
-        max_char = max(len(str(c)) for c in cols)
-        width_chars = max_char + 4
-        height_lines = min(len(cols), 20)
-
+        maxc = max(len(str(c)) for c in cols)
+        wchars = maxc + 4
+        hlines = min(len(cols),20)
         pop = tk.Toplevel(self.root)
         pop.title("Reorder Fields")
-
-        lb = tk.Listbox(pop, width=width_chars, height=height_lines)
-        lb.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-        for col in cols:
-            lb.insert("end", col)
-
-        fr = ttk.Frame(pop)
-        fr.pack(side="left", padx=5, pady=5, fill="y")
-
+        lb = tk.Listbox(pop, width=wchars, height=hlines)
+        lb.pack(side="left", fill="both", expand=True, padx=5,pady=5)
+        for c in cols: lb.insert("end", c)
+        fr = ttk.Frame(pop); fr.pack(side="left", padx=5,pady=5, fill="y")
         def move(dx):
             sel = lb.curselection()
-            if not sel:
-                return
-            i = sel[0]
-            j = i + dx
-            if j < 0 or j >= lb.size():
-                return
+            if not sel: return
+            i = sel[0]; j = i+dx
+            if j<0 or j>=lb.size(): return
             txt = lb.get(i)
-            lb.delete(i)
-            lb.insert(j, txt)
-            lb.selection_set(j)
-
+            lb.delete(i); lb.insert(j, txt); lb.selection_set(j)
         ttk.Button(fr, text="Up",   command=lambda: move(-1)).pack(fill="x", pady=2)
-        ttk.Button(fr, text="Down", command=lambda: move(1)).pack(fill="x", pady=2)
+        ttk.Button(fr, text="Down", command=lambda: move(1 )).pack(fill="x", pady=2)
         ttk.Button(pop, text="Apply", command=lambda: apply_order()).pack(side="bottom", pady=5)
-
         def apply_order():
-            new_cols = [lb.get(i) for i in range(lb.size())]
-            self.df = self.df.reindex(columns=new_cols)
+            self.columns = [lb.get(i) for i in range(lb.size())]
             pop.destroy()
             self.build_dynamic_buttons()
-            self.show_treeview(self.df)
+            self.show_treeview(self.current_records)
             self.center_window()
-
-        pop.transient(self.root)
-        pop.grab_set()
-        pop.wait_window()
+        pop.transient(self.root); pop.grab_set(); pop.wait_window()
 
     def save_json(self):
-        if self.df is None:
+        if not self.records:
             messagebox.showerror("Error", "No data to save.")
             return
         path = filedialog.asksaveasfilename(defaultextension=".json",
                                             filetypes=[("JSON","*.json")])
         if not path:
             return
-
-        df_clean = self.df.fillna('')
-        recs = df_clean.to_dict(orient='records')
-
+        # prepare output
+        out = None
         if self.orig_format == 'dict':
-            out = {r['ID key']: {k: v for k, v in r.items() if k != 'ID key'} for r in recs}
+            out = {}
+            for r in self.records:
+                key = r.get('ID key')
+                if key is None:
+                    continue
+                obj = {k:v for k,v in r.items() if k not in ('ID key','_idx')}
+                out[key] = obj
         else:
             out = []
-            for r in recs:
-                entry = r.copy()
-                if 'ID key' in entry:
-                    entry['key'] = entry.pop('ID key')
-                out.append(entry)
-
+            for r in self.records:
+                rec = {k:v for k,v in r.items() if k!='_idx'}
+                if 'ID key' in rec:
+                    rec['key'] = rec.pop('ID key')
+                out.append(rec)
         try:
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(out, f, indent=2, ensure_ascii=False)
@@ -312,7 +324,7 @@ class JSONCheckerApp:
 def main():
     root = tk.Tk()
     app = JSONCheckerApp(root)
-    # support drag-and-drop of a .json onto the exe
+    # drag-and-drop support
     if len(sys.argv) > 1 and sys.argv[1].lower().endswith('.json'):
         app.load_json_file(sys.argv[1])
     root.mainloop()

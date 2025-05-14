@@ -6,3 +6,5 @@ Do not forget to hit the Save JSON button! <br/>
 CTRL+C to copy anything highlighted to the clipboard. <br/>
 Columns can be A-Z sorted by clicking on them. <br/>
 Exe is drop and drag ready. <br/>
+
+![screenshot](https://github.com/synrais/Simple-JSON-Viewer-Editor/blob/main/Screenshot.png)
